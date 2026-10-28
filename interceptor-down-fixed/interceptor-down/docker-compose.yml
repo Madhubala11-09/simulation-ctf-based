@@ -1,0 +1,149 @@
+version: "3.8"
+
+# --- Network segmentation (Purdue-model-flavored) ---
+# it-net:  reachable from the player's attack box. Only it-foothold lives
+#          here exclusively; historian/engineering-ws/hmi bridge both
+#          networks (they are the pivot points).
+# ot-net:  internal only, no external egress. Historian, engineering-ws,
+#          both PLCs, and the HMI all sit here.
+# uas-net: internal only, isolated, reachable only through the HMI bridge.
+#
+# NOTE: "ot-net: 172.20.0.0/24" that the historian/HMI text refers to is
+# IN-FICTION flavor text only -- it is NOT the real subnet Docker assigns
+# to the `ot-net` network below (Docker auto-assigns its own bridge
+# subnets, e.g. 172.18.x.x/172.19.x.x -- check with
+# `docker network inspect interceptor-down_ot-net`). `ot-net` is also
+# `internal: true`, so it is never meant to be nmap-able directly from
+# your attack box; you're meant to pivot through historian/EWS/HMI.
+# For LOCAL TESTING ONLY (not the real attack path), every service port
+# below is also published to the host, so `nmap -p- -sV 127.0.0.1` (or
+# just curl/connect to localhost:<port>) is the right way to sanity-check
+# a running stack from your own machine.
+#
+# NOTE ON HARDENING FOR A REAL MULTI-TEAM EVENT:
+# This compose file publishes every service's port to the host for easy
+# local development/testing. For an actual CTF deployment, remove the
+# `ports:` mappings on everything except it-foothold, so players can only
+# reach ot-net/uas-net services by actually pivoting through a compromised
+# host on it-net -- otherwise the network segmentation lesson is
+# undermined by the convenience port mappings below.
+#
+# NOTE ON "exited with code 137" (OOM-kill):
+# All services here are intentionally tiny (plain Flask apps / raw
+# sockets, a few MB RSS each) -- if you see every container die with
+# 137 at once, that's the *host* (or Docker's VM, if on Mac/Windows)
+# running out of memory, not a bug in this code. Check `dmesg | grep -i
+# -e oom -e "killed process"` (Linux host) or Docker Desktop's memory
+# usage. The `mem_limit`/`mem_reservation` lines below cap each service
+# well under what a modern machine should have free, and `restart:
+# unless-stopped` means a transient kill self-heals instead of taking
+# the whole stack down with it. If containers keep dying, free up host
+# RAM (close other heavy apps) or, on Docker Desktop, raise
+# Settings -> Resources -> Memory.
+
+networks:
+  it-net:
+    driver: bridge
+  ot-net:
+    driver: bridge
+    internal: true
+  uas-net:
+    driver: bridge
+    internal: true
+
+services:
+  it-foothold:
+    build: ./it-foothold
+    networks: [it-net]
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+    mem_limit: 128m
+    mem_reservation: 64m
+
+  historian:
+    build: ./historian
+    networks: [it-net, ot-net]
+    ports:
+      - "7878:7878"   # remove for hardened multi-team deployment
+    restart: unless-stopped
+    mem_limit: 96m
+    mem_reservation: 32m
+
+  engineering-ws:
+    build: ./engineering-ws
+    networks: [it-net, ot-net]
+    ports:
+      - "8081:8081"   # remove for hardened multi-team deployment
+    restart: unless-stopped
+    mem_limit: 128m
+    mem_reservation: 64m
+
+  plc-radar:
+    build: ./plc-radar
+    networks: [ot-net]
+    environment:
+      - PORT=502
+      - LOCK_HOLD_SECONDS=4.0
+    ports:
+      - "5020:502"    # remove for hardened multi-team deployment
+    restart: unless-stopped
+    mem_limit: 96m
+    mem_reservation: 32m
+
+  plc-battery:
+    build: ./plc-battery
+    networks: [ot-net]
+    environment:
+      - PORT=502
+      - RADAR_HOST=plc-radar
+      - RADAR_PORT=502
+      - ARTIFICIAL_DELAY=0.25
+      - FLAG=CTF{toctou_cross_plc_interlock_bypass_demo}
+    ports:
+      - "5021:502"    # remove for hardened multi-team deployment
+    depends_on:
+      - plc-radar
+    restart: unless-stopped
+    mem_limit: 96m
+    mem_reservation: 32m
+
+  hmi:
+    build: ./hmi
+    networks: [ot-net, it-net]
+    environment:
+      - RADAR_HOST=plc-radar
+      - RADAR_PORT=502
+      - BATTERY_HOST=plc-battery
+      - BATTERY_PORT=502
+    ports:
+      - "8082:8082"
+    depends_on:
+      - plc-radar
+      - plc-battery
+    restart: unless-stopped
+    mem_limit: 128m
+    mem_reservation: 64m
+
+  mosquitto:
+    image: eclipse-mosquitto:2
+    networks: [uas-net]
+    ports:
+      - "1883:1883"   # remove for hardened multi-team deployment
+    volumes:
+      - ./uas-telemetry/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+    restart: unless-stopped
+    mem_limit: 96m
+    mem_reservation: 32m
+
+  uas-publisher:
+    build: ./uas-telemetry
+    networks: [uas-net]
+    environment:
+      - BROKER_HOST=mosquitto
+      - BROKER_PORT=1883
+    depends_on:
+      - mosquitto
+    restart: unless-stopped
+    mem_limit: 64m
+    mem_reservation: 24m
