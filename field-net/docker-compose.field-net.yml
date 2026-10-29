@@ -1,0 +1,66 @@
+# Merge/extend into your existing docker-compose.yml.
+# Pattern mirrors ot-net: field-net is internal-only, bridged exclusively
+# through engineering-ws (same machine that already sits on ot-net).
+
+networks:
+  field-net:
+    internal: true   # no direct external access -- must pivot through engineering-ws
+
+volumes:
+  field-shared:       # shared scratch volume for the hart-gateway -> plc-radar coupling
+
+services:
+
+  field-console:
+    build: ./field-console
+    environment:
+      FIELD_CONSOLE_PORT: "2323"
+      FIELD_CONSOLE_USER: "fieldtech"
+      FIELD_CONSOLE_PASS: "fieldtech123"   # match whatever breadcrumb Stage 2/3 leaves
+      HART_GATEWAY_HOST: "hart-gateway"
+      HART_GATEWAY_PORT: "5094"
+      HART_DEVICE_TAG: "RDR-CAL-07"
+    networks:
+      - field-net
+    # No ports: exposed, published to players only via engineering-ws pivot
+
+  hart-gateway:
+    build: ./hart-gateway
+    environment:
+      HART_GATEWAY_PORT: "5094"
+      HART_DEVICE_TAG: "RDR-CAL-07"
+      HART_MECH_COUPLING: "1"
+      SHARED_STATE_PATH: "/shared/calibration_offset.json"
+    volumes:
+      - field-shared:/shared
+    networks:
+      - field-net
+
+  field-safety-bus:
+    build: ./field-safety-bus
+    environment:
+      FIELD_SAFETY_BUS_PORT: "4747"
+      FSB_BROADCAST_MS: "500"
+      SHARED_STATE_PATH: "/shared/calibration_offset.json"
+    volumes:
+      - field-shared:/shared
+    networks:
+      - field-net
+
+  # --- existing plc-radar service: add these two lines ---
+  # plc-radar:
+  #   volumes:
+  #     - field-shared:/shared:ro      # read-only: radar only ever reads the offset
+  #   environment:
+  #     SHARED_STATE_PATH: "/shared/calibration_offset.json"
+  #   networks:
+  #     - field-net    # <-- ONLY if you want radar itself reachable on field-net;
+  #                     #     otherwise leave it off and let plc-radar stay purely
+  #                     #     Modbus/ot-net-facing, coupled to hart-gateway only
+  #                     #     via the shared volume, never a live network link.
+
+  # --- existing engineering-ws service: give it the pivot ---
+  # engineering-ws:
+  #   networks:
+  #     - ot-net
+  #     - field-net   # <-- add this
